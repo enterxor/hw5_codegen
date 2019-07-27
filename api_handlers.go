@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -12,7 +12,7 @@ func (srv *OtherApi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/user/profile":
 		fmt.Println("trying to use otherApi")
 	default:
-		fmt.Fprintf(w, "Page not found")
+		http.Error(w, "{\"error\": \"unknown method\"}", http.StatusNotFound)
 		// 404
 	}
 }
@@ -23,38 +23,59 @@ func (srv *MyApi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/user/profile":
 		srv.handlerUserProfeile(w, r)
 	default:
-		fmt.Fprintf(w, "Page not found")
+		resJSON, _ := json.Marshal(map[string]string{"error": "unknown method"})
+		http.Error(w, string(resJSON), http.StatusNotFound)
 		// 404
 	}
 }
-
 
 func (srv *MyApi) handlerUserProfeile(w http.ResponseWriter, r *http.Request) {
 	// заполнение структуры params
 	// валидирование параметров
 	fmt.Println("")
-	var ctx context.Context = r.Context()
+	ctx := r.Context()
+	var params *ProfileParams
+	if r.Method == http.MethodGet {
+		logins, ok := r.URL.Query()["login"] //required
+		if !ok || len(logins[0]) < 1 {
+			fmt.Printf("missing param user in request profile\n")
+			resJSON, _ := json.Marshal(map[string]string{"error": "login must me not empty"})
+			http.Error(w, string(resJSON), http.StatusBadRequest)
+			return
+		}
 
-	params := ProfileParams{  r.URL.Query()["user"][0]}
-	fmt.Printf("Request profile for user'%s'\n",params.Login)
+		params = &ProfileParams{logins[0]}
+	} else if r.Method == http.MethodPost {
+		r.ParseForm()
+		login := r.FormValue("login")
+		if len(login) < 1 {
+			fmt.Printf("missing param user in request profile\n")
+			resJSON, _ := json.Marshal(map[string]string{"error": "login must me not empty"})
+			http.Error(w, string(resJSON), http.StatusBadRequest)
+			return
+		}
+		params = &ProfileParams{login}
+	}
 
-	res, err := srv.Profile(ctx, params)
+	fmt.Printf("Request profile for user'%s'\n", params.Login)
+
+	res, err := srv.Profile(ctx, *params)
 	if err != nil {
 		switch err.(type) {
-		case *ApiError:
-			err:= err.(*ApiError)
-			http.Error(w, "customer internal error", err.HTTPStatus)
+		case ApiError:
+			err := err.(ApiError)
+			resJSON, _ := json.Marshal(map[string]string{"error": err.Error()})
+			http.Error(w, string(resJSON), err.HTTPStatus)
 		default:
-			fmt.Printf("internal error: %+v\n", err)
-			http.Error(w, "internal error", 500)
+			resJSON, _ := json.Marshal(map[string]string{"error": err.Error()})
+			http.Error(w, string(resJSON), 500)
 		}
 		return
 	}
-	
-	fmt.Fprintf(w,"User.ID=%d\n", res.ID)
-	fmt.Fprintln(w,"User.Login="+res.Login)
-	fmt.Fprintln(w,"User.FullName="+res.FullName)
-	fmt.Fprintf(w,"User.Status=%d\n",res.Status)
+
+	resultJSON, _ := json.Marshal(map[string]interface{}{"response": res, "error": ""})
+	fmt.Fprintf(w, string(resultJSON))
+
 	return
 	// прочие обработки
 }
@@ -63,7 +84,7 @@ func (srv *MyApi) handlerUserCreate(w http.ResponseWriter, r *http.Request) {
 	// заполнение структуры params
 	// валидирование параметров
 	fmt.Println("")
-	var ctx context.Context = r.Context()
+	var ctx = r.Context()
 	params := CreateParams{}
 	res, err := srv.Create(ctx, params)
 	if err != nil {
