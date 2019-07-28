@@ -18,7 +18,7 @@ import (
 //APIMethodProperties - apigen:api fields
 type apiMethodProperties struct {
 	URL    string `json:"url"`
-	Auth   string `json:"auth"`
+	Auth   bool   `json:"auth"`
 	Method string `json:"method"`
 	Name   string
 	Owner  string
@@ -35,7 +35,9 @@ type validationProps struct {
 	fieldType  string
 	required   bool
 	min        int
+	min_flag   bool
 	max        int
+	max_flag   bool
 	enum       bool
 	enumVals   []string
 	defaultVal string
@@ -63,6 +65,7 @@ func (valp *validationProps) parseTag(tag string) {
 			}
 		case "min":
 			{
+				valp.min_flag = true
 				i1, err := strconv.Atoi(spltElem[1])
 				if err != nil {
 					continue
@@ -71,6 +74,7 @@ func (valp *validationProps) parseTag(tag string) {
 			}
 		case "max":
 			{
+				valp.max_flag = true
 				i1, err := strconv.Atoi(spltElem[1])
 				if err != nil {
 					continue
@@ -125,6 +129,8 @@ var (
 `))
 
 	wrappetTpl = template.Must(template.New("wrapperHandlerTpl").Parse(`
+
+	
 	func (srv *{{.ApiName}}) wrapper{{.ApiName}}{{.MethodName}}(w http.ResponseWriter, r *http.Request) {
 		// заполнение структуры params
 		// валидирование параметров
@@ -205,7 +211,7 @@ func generateParamsForGET(meth *apiMethodProperties) string {
 		if j.fieldType == "int" {
 			res += "i1, err := strconv.Atoi(" + j.paramName + ")\n"
 			res += "if err != nil {\n"
-			res += errortojson(j.paramName+" failed to convert to int", http.StatusBadRequest)
+			res += errortojson(j.paramName+" must be int", http.StatusBadRequest)
 			res += "}\n"
 			res += "params." + j.fieldname + " = i1\n"
 		} else {
@@ -235,7 +241,8 @@ func generateParamsForPOST(meth *apiMethodProperties) string {
 		if j.fieldType == "int" {
 			res += "i1, err := strconv.Atoi(" + j.fieldname + ")\n"
 			res += "if err != nil {\n"
-			res += errortojson(j.paramName+" failed to convert to int", http.StatusBadRequest)
+			res += errortojson(j.paramName+" must be int", http.StatusBadRequest)
+			res += "    return\n"
 			res += "}\n"
 			res += "params." + j.fieldname + " = i1\n"
 		} else {
@@ -249,7 +256,53 @@ func generateParamsForPOST(meth *apiMethodProperties) string {
 }
 
 func generateValidationCode(meth *apiMethodProperties) string {
-	return ""
+	res := ""
+	for _, j := range meth.Params.fields {
+		if len(j.paramName) < 1 {
+			j.paramName = strings.ToLower(j.fieldname)
+		}
+		if j.enum {
+			res += "var " + j.fieldname + "Enum []string\n"
+			for _, k := range j.enumVals {
+				res += j.fieldname + "Enum = append(" + j.fieldname + "Enum," + "\"" + k + "\")\n"
+				//" + strconv.Itoa(len(j.enumVals)) + "
+				//res += j.fieldname + "Enum[" + strconv.Itoa(idx) + "] = \"" + k + "\"\n"
+			}
+			res += "if !contains(" + j.fieldname + "Enum, params." + j.fieldname + ") { \n"
+			res += errortojson(j.paramName+" must be one of [\"+strings.Join("+j.fieldname+"Enum ,\", \" )+\"]", http.StatusBadRequest)
+			res += "    return\n"
+			res += "}\n"
+		}
+		if j.fieldType == "int" {
+			if j.min_flag {
+				res += "if params." + j.fieldname + " < " + strconv.Itoa(j.min) + " {\n"
+				res += errortojson(j.paramName+" must be >= "+strconv.Itoa(j.min), http.StatusBadRequest)
+				res += "    return\n"
+				res += "}\n"
+			}
+			if j.max_flag {
+				res += "if params." + j.fieldname + " > " + strconv.Itoa(j.max) + " {\n"
+				res += errortojson(j.paramName+" must be <= "+strconv.Itoa(j.max), http.StatusBadRequest)
+				res += "    return\n"
+				res += "}\n"
+			}
+		} else {
+			if j.min_flag {
+				res += "if len(params." + j.fieldname + ") < " + strconv.Itoa(j.min) + " {\n"
+				res += errortojson(j.paramName+" len must be >= "+strconv.Itoa(j.min), http.StatusBadRequest)
+				res += "    return\n"
+				res += "}\n"
+			}
+			if j.max_flag {
+				res += "if len(params." + j.fieldname + ") > " + strconv.Itoa(j.max) + " {\n"
+				res += errortojson(j.paramName+" len must be <= "+strconv.Itoa(j.max), http.StatusBadRequest)
+				res += "    return\n"
+				res += "}\n"
+			}
+		}
+
+	}
+	return res
 }
 func writeWrapper(w io.Writer, meth apiMethodProperties) {
 	//здесь генерируем конкретный враппер для текущего метода
@@ -267,11 +320,11 @@ func writeWrapper(w io.Writer, meth apiMethodProperties) {
 	tl.MethodName = meth.Name
 	tl.ParamStructName = meth.Params.StructName
 
-	if meth.Auth == "true" {
-		tl.AuthCode = "cookie:= r.Header.Get(\"X-Auth\")"
+	if meth.Auth {
+		tl.AuthCode = "cookie:= r.Header.Get(\"X-Auth\")\n"
 		tl.AuthCode += "if cookie != \"100500\" { \n"
 		tl.AuthCode += "    resJSON, _ := json.Marshal(map[string]string{\"error\": \"unauthorized\"})\n"
-		tl.AuthCode += "    http.Error(w, string(resJSON), http.StatusForbidden)\n"
+		tl.AuthCode += "    http.Error(w, string(resJSON), 403)\n"
 		tl.AuthCode += "    return\n"
 		tl.AuthCode += "}\n"
 	}
@@ -286,6 +339,8 @@ func writeWrapper(w io.Writer, meth apiMethodProperties) {
 	} else {
 		tl.ParseGetCode = generateParamsForGET(&meth)
 	}
+
+	tl.ValidationCode = generateValidationCode(&meth)
 
 	wrappetTpl.Execute(w, tl)
 }
@@ -307,7 +362,17 @@ func main() {
 	fmt.Fprintln(out, `import "encoding/json"`)
 	fmt.Fprintln(out, `import "fmt"`)
 	fmt.Fprintln(out, `import "net/http"`)
+	fmt.Fprintln(out, `import "strconv"`)
 	fmt.Fprintln(out) // empty line
+	fmt.Fprintln(out, `	func contains(slice []string, item string) bool {
+		set := make(map[string]struct{}, len(slice))
+		for _, s := range slice {
+			set[s] = struct{}{}
+		}
+	
+		_, ok := set[item] 
+		return ok
+	}`)
 
 	for _, f := range node.Decls {
 		g, ok := f.(*ast.FuncDecl)
@@ -331,7 +396,7 @@ func main() {
 		json.Unmarshal([]byte(tag[indx+len("apigen:api"):]), &res)
 		res.Name = g.Name.Name
 		fmt.Println(tag)
-		fmt.Println("A" + res.Auth)
+		fmt.Println("A" + strconv.FormatBool(res.Auth))
 		fmt.Println("M" + res.Method)
 		fmt.Println("U" + res.URL)
 
