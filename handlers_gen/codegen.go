@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -106,6 +107,7 @@ type tpl struct {
 	MethodCheckCode string
 	ParseGetCode    string
 	ParsePostCode   string
+	ValidationCode  string
 }
 
 var (
@@ -128,7 +130,7 @@ var (
 		// валидирование параметров
 		fmt.Println("")
 		ctx := r.Context()
-		var params *{{.ParamStructName}}
+		var params {{.ParamStructName}}
 
 		{{.AuthCode}}
 
@@ -137,10 +139,12 @@ var (
 		{{.ParseGetCode}}
 
 		{{.ParsePostCode}}
+
+		{{.ValidationCode}}
 	
-		fmt.Printf("Request {{.MethodName}} for user'%s'\n", params.Login)
+		fmt.Printf("Request {{.MethodName}} \n")
 	
-		res, err := srv.{{.MethodName}}(ctx, *params)
+		res, err := srv.{{.MethodName}}(ctx, params)
 		if err != nil {
 			switch err.(type) {
 			case ApiError:
@@ -170,8 +174,8 @@ func makeWrapperMethodName(methodName string, parentStruct string) string {
 func writeHTTPHandlers(w io.Writer, meths []apiMethodProperties, structName string) {
 	cases := ""
 	for _, sre := range meths {
-		cases += "\t\tcase \"" + sre.URL + "\" {\n\t\t\t"
-		cases += makeWrapperMethodName(sre.Name, structName) + "(w,r) \n\t\t}\n"
+		cases += "\t\tcase \"" + sre.URL + "\" :\n{\n\t\t\t"
+		cases += "srv." + makeWrapperMethodName(sre.Name, structName) + "(w,r) \n\t\t}\n"
 	}
 	var tl tpl
 	tl.ApiName = structName
@@ -179,6 +183,74 @@ func writeHTTPHandlers(w io.Writer, meths []apiMethodProperties, structName stri
 	intTpl.Execute(w, tl)
 }
 
+func errortojson(msg string, status int) string {
+	res := ""
+	res += "    resJSON, _ := json.Marshal(map[string]string{\"error\": \"" + msg + "\"})\n"
+	res += "    http.Error(w, string(resJSON), " + strconv.Itoa(status) + ")\n"
+	return res
+}
+func generateParamsForGET(meth *apiMethodProperties) string {
+	res := "if r.Method == http.MethodGet {\n"
+	for _, j := range meth.Params.fields {
+		if len(j.paramName) < 1 {
+			j.paramName = strings.ToLower(j.fieldname)
+		}
+		res += "" + j.fieldname + ",ok := r.URL.Query()[\"" + j.paramName + "\"]\n"
+		if j.required {
+			res += "if !ok || len(" + j.fieldname + "[0]) < 1 {\n"
+			res += errortojson(j.paramName+" must me not empty", http.StatusBadRequest)
+			res += "    return\n"
+			res += "}\n"
+		}
+		if j.fieldType == "int" {
+			res += "i1, err := strconv.Atoi(" + j.paramName + ")\n"
+			res += "if err != nil {\n"
+			res += errortojson(j.paramName+" failed to convert to int", http.StatusBadRequest)
+			res += "}\n"
+			res += "params." + j.fieldname + " = i1\n"
+		} else {
+			res += "params." + j.fieldname + " = " + j.fieldname + "[0]\n"
+		}
+	}
+
+	res += "}\n"
+	return res
+}
+func generateParamsForPOST(meth *apiMethodProperties) string {
+	res := "if r.Method == http.MethodPost {\n"
+	res += "r.ParseForm()\n"
+
+	for _, j := range meth.Params.fields {
+		if len(j.paramName) < 1 {
+			j.paramName = strings.ToLower(j.fieldname)
+		}
+
+		res += j.fieldname + " := r.FormValue(\"" + j.paramName + "\")\n"
+		res += "if len(" + j.fieldname + ") < 1 {\n"
+		if j.required {
+			res += errortojson(j.paramName+" must me not empty", http.StatusBadRequest)
+			res += "    return\n"
+		}
+		res += "}else{\n"
+		if j.fieldType == "int" {
+			res += "i1, err := strconv.Atoi(" + j.fieldname + ")\n"
+			res += "if err != nil {\n"
+			res += errortojson(j.paramName+" failed to convert to int", http.StatusBadRequest)
+			res += "}\n"
+			res += "params." + j.fieldname + " = i1\n"
+		} else {
+			res += "params." + j.fieldname + " = " + j.fieldname + "\n"
+		}
+		res += "}\n"
+	}
+
+	res += "}\n"
+	return res
+}
+
+func generateValidationCode(meth *apiMethodProperties) string {
+	return ""
+}
 func writeWrapper(w io.Writer, meth apiMethodProperties) {
 	//здесь генерируем конкретный враппер для текущего метода
 	//0 проверяем авторизацию
@@ -194,6 +266,26 @@ func writeWrapper(w io.Writer, meth apiMethodProperties) {
 	tl.ApiName = meth.Owner
 	tl.MethodName = meth.Name
 	tl.ParamStructName = meth.Params.StructName
+
+	if meth.Auth == "true" {
+		tl.AuthCode = "cookie:= r.Header.Get(\"X-Auth\")"
+		tl.AuthCode += "if cookie != \"100500\" { \n"
+		tl.AuthCode += "    resJSON, _ := json.Marshal(map[string]string{\"error\": \"unauthorized\"})\n"
+		tl.AuthCode += "    http.Error(w, string(resJSON), http.StatusForbidden)\n"
+		tl.AuthCode += "    return\n"
+		tl.AuthCode += "}\n"
+	}
+
+	tl.ParsePostCode = generateParamsForPOST(&meth)
+	if meth.Method == "POST" {
+		tl.MethodCheckCode += "if r.Method == http.MethodGet { \n"
+		tl.MethodCheckCode += "    resJSON, _ := json.Marshal(map[string]string{\"error\": \"bad method\"})\n"
+		tl.MethodCheckCode += "    http.Error(w, string(resJSON), http.StatusNotAcceptable)\n"
+		tl.MethodCheckCode += "    return\n"
+		tl.MethodCheckCode += "}\n"
+	} else {
+		tl.ParseGetCode = generateParamsForGET(&meth)
+	}
 
 	wrappetTpl.Execute(w, tl)
 }
