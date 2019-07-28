@@ -30,17 +30,18 @@ type methodParamsStruct struct {
 }
 
 type validationProps struct {
-	fieldname  string
-	paramName  string
-	fieldType  string
-	required   bool
-	min        int
-	min_flag   bool
-	max        int
-	max_flag   bool
-	enum       bool
-	enumVals   []string
-	defaultVal string
+	fieldname   string
+	paramName   string
+	fieldType   string
+	required    bool
+	min         int
+	min_flag    bool
+	max         int
+	max_flag    bool
+	enum        bool
+	enumVals    []string
+	defaultVal  string
+	defaultFlag bool
 }
 
 func (valp *validationProps) parseTag(tag string) {
@@ -87,6 +88,7 @@ func (valp *validationProps) parseTag(tag string) {
 			}
 		case "default":
 			{
+				valp.defaultFlag = true
 				valp.defaultVal = spltElem[1]
 			}
 		case "enum":
@@ -236,6 +238,9 @@ func generateParamsForPOST(meth *apiMethodProperties) string {
 		if j.required {
 			res += errortojson(j.paramName+" must me not empty", http.StatusBadRequest)
 			res += "    return\n"
+		}
+		if j.defaultFlag {
+			res += "params." + j.fieldname + " = \"" + j.defaultVal + "\"\n"
 		}
 		res += "}else{\n"
 		if j.fieldType == "int" {
